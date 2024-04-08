@@ -1,0 +1,746 @@
+--**********************************************************************************************************************************************************************************
+-- Ecommerce Data BigQuery SQL Script
+--**********************************************************************************************************************************************************************************
+
+/*
+
+-- All work dones in SQL Server and VS Code and moved to BigQuery
+-- Files customers.csv, products.csv, and transactions.csv were all loaded manually to the 'ecomm' dataset in BigQuery. All tables are aliased accordingly. 
+
+*/
+
+
+--**********************************************************************************************************************************************************************************
+-- Import data into SQL database.
+--**********************************************************************************************************************************************************************************
+
+CREATE OR REPLACE TABLE ecomm.Core_Data_Staging (
+    transaction_id INT64,
+    customer_id INT64,
+    product_id INT64,
+    purchase_timestamp TIMESTAMP,
+    purchase_amount FLOAT64,
+    customer_name STRING,
+    email STRING,
+    product_name STRING,
+    category STRING,
+    price FLOAT64
+) AS
+SELECT
+    t.transaction_id,
+    t.customer_id,
+    t.product_id,
+    t.purchase_timestamp,
+    t.purchase_amount,
+    c.customer_name,
+    c.email,
+    p.product_name,
+    p.category,
+    p.price
+FROM
+    ecomm.transactions t
+JOIN
+    ecomm.customers c ON t.customer_id = c.customer_id
+JOIN
+    ecomm.products p ON t.product_id = p.product_id
+;
+
+
+--**********************************************************************************************************************************************************************************
+-- Data Exploration
+--**********************************************************************************************************************************************************************************
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- 1) Retrieve the total number of transactions and revenue by product category.
+CREATE OR REPLACE TABLE ecomm.TotalTransactionsAndRevenueByCategory AS
+SELECT 
+    category AS ProductCategory,
+    COUNT(*) AS Transactions,
+    ROUND(SUM(purchase_amount),2) AS Revenue  --Since BQ doesn't use Money I guess...rounding to 2 decimal places where I can
+FROM 
+    ecomm.Core_Data
+GROUP BY 
+    ProductCategory
+ORDER BY 
+    Transactions DESC
+;
+
+
+-- Select * from ecomm.TotalTransactionsAndRevenueByCategory
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- Identifying the top 10 user-names by total revenue.
+CREATE OR REPLACE TABLE ecomm.Top10UsersByRevenue AS
+SELECT 
+    customer_name AS Customer,
+    ROUND(SUM(purchase_amount),2) AS Revenue
+FROM 
+    ecomm.Core_Data
+GROUP BY 
+    Customer
+ORDER BY 
+    Revenue DESC
+LIMIT 10
+;
+
+-- Select * from ecomm.Top10UsersByRevenue
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- Calculating the difference of weekday vs. weekend average revenue.
+
+CREATE OR REPLACE TABLE ecomm.Core_Data AS
+SELECT *,
+  CASE
+    WHEN EXTRACT(DAYOFWEEK FROM purchase_timestamp) IN (1, 7) THEN 'Weekend' --Required a much more different approach than SQL Server
+    ELSE 'Weekday'
+  END AS DayType,
+  FORMAT_TIMESTAMP('%A', purchase_timestamp) AS Day,    -- these BigQuery Format syntax is something I am going to have to learn a bit
+  CASE
+    WHEN EXTRACT(MONTH FROM purchase_timestamp) BETWEEN 1 AND 3 THEN 'Post-Holiday'
+    WHEN EXTRACT(MONTH FROM purchase_timestamp) BETWEEN 4 AND 5 THEN 'Spring'
+    WHEN EXTRACT(MONTH FROM purchase_timestamp) BETWEEN 6 AND 9 THEN 'Summer'
+    ELSE 'Holiday'
+  END AS RetailSeason
+FROM ecomm.Core_Data_Staging
+;
+
+
+--Average Revenues based on both the DayType (Weekday, Weekend) and Day (Monday, Tuesday, etc.)
+CREATE OR REPLACE TABLE ecomm.AverageRevenueByDayType AS
+SELECT 
+  DayType, 
+  ROUND(AVG(purchase_amount),2) AS Average_Revenue
+FROM 
+  ecomm.Core_Data
+GROUP BY 
+  DayType
+
+  ;
+
+-- Select * ecomm.AverageRevenueByDayType
+
+
+CREATE OR REPLACE TABLE ecomm.AverageRevenueByDay AS
+SELECT 
+  Day, 
+  ROUND(AVG(purchase_amount),2) AS Average_Revenue
+FROM 
+  ecomm.Core_Data
+GROUP BY 
+  Day;
+
+-- Select * from ecomm.AverageRevenueByDay
+
+
+-- Creating Retail Seasons
+CREATE OR REPLACE TABLE ecomm.AverageRevenueBySeason AS
+SELECT 
+  RetailSeason, 
+  ROUND(AVG(purchase_amount),2) AS Average_Revenue
+FROM 
+  ecomm.Core_Data
+GROUP BY 
+  RetailSeason;
+
+-- Select * from ecomm.AverageRevenueBySeason
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- Calculating the average, median, and 90th percentile purchase amount.
+
+CREATE OR REPLACE TABLE ecomm.AverageMedianAnd90thPercentile AS
+SELECT
+  ROUND(AVG(purchase_amount), 2) AS AveragePurchaseAmount,
+  ROUND(APPROX_QUANTILES(purchase_amount, 100)[OFFSET(50)], 2) AS MedianPurchaseAmount, -- the best solution I have found to replace my PERCENTILE_CONT from SQL Server
+  ROUND(APPROX_QUANTILES(purchase_amount, 100)[OFFSET(90)], 2) AS Percentile90PurchaseAmount
+FROM
+  ecomm.Core_Data
+
+
+;
+
+
+-- Select * from ecomm.AverageMedianAnd90thPercentile
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- Calculating the 7 day rolling average of daily revenue.
+
+CREATE OR REPLACE TABLE ecomm.AverageRevenue7DayRolling AS
+WITH DailyRevenue AS (
+  SELECT
+    DATE(purchase_timestamp) AS Date,
+    SUM(purchase_amount) AS TotalRevenue
+  FROM ecomm.Core_Data
+  GROUP BY DATE(purchase_timestamp)
+),
+RollingAverage AS (
+  SELECT
+    Date,
+    TotalRevenue,
+    AVG(TotalRevenue) OVER (ORDER BY Date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS SevenDayAvgRevenue
+  FROM DailyRevenue
+)
+SELECT 
+  Date, 
+  SevenDayAvgRevenue
+FROM RollingAverage
+ORDER BY Date;
+
+-- Select * from ecomm.AverageRevenue7DayRolling
+
+
+-- *****BONUS: Rolling Month Average*****
+CREATE OR REPLACE TABLE ecomm.AverageRevenue3MonthRolling AS
+WITH MonthlyRevenue AS (
+  SELECT
+    EXTRACT(MONTH FROM purchase_timestamp) AS Month,
+    SUM(purchase_amount) AS TotalRevenue
+  FROM ecomm.Core_Data
+  GROUP BY Month
+),
+RollingAverage AS (
+  SELECT
+    Month AS PurchaseMonth, 
+    TotalRevenue,
+    AVG(TotalRevenue) OVER (ORDER BY Month ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS ThreeMonthAvgRevenue
+  FROM MonthlyRevenue
+)
+SELECT 
+  PurchaseMonth, 
+  ROUND(ThreeMonthAvgRevenue, 2) AS ThreeMonthAvgRevenue
+FROM RollingAverage
+ORDER BY PurchaseMonth
+
+;
+
+-- Select * from ecomm.AverageRevenue3MonthRolling
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- Calculating the week-over-week percent change for weekly revenue.
+
+CREATE OR REPLACE TABLE ecomm.WoWRevenuePercentageChange AS
+SELECT
+  FORMAT_DATE("%G-W%V", purchase_timestamp) AS Week, -- ISO week format apparently? Looked this up to keep my dates formatted correctly.
+  TotalRevenue,
+  IFNULL(PreviousWeekRevenue, 0) AS PreviousWeekRevenue, -- Use IFNULL/ISNULL to handle NULLs
+  CONCAT(CAST(IFNULL(((TotalRevenue - IFNULL(PreviousWeekRevenue, 0)) / NULLIF(PreviousWeekRevenue, 0)) * 100, 0) AS STRING),'%') AS PercentChange --Made this a string with a % for fun.
+FROM (
+  SELECT
+    purchase_timestamp,
+    SUM(purchase_amount) AS TotalRevenue,
+    LAG(SUM(purchase_amount)) OVER (ORDER BY EXTRACT(YEAR FROM purchase_timestamp), EXTRACT(WEEK FROM purchase_timestamp)) AS PreviousWeekRevenue -- Using LAG to get previous week's revenue
+  FROM 
+    ecomm.Core_Data
+  GROUP BY 
+    purchase_timestamp
+)
+ORDER BY 
+  Week
+  
+  ;
+
+-- Select * from ecomm.WoWRevenuePercentageChange
+
+
+--**********************************************************************************************************************************************************************************
+-- Customer Segmentation
+--**********************************************************************************************************************************************************************************
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+CREATE OR REPLACE TABLE ecomm.One_Time_Buyers (
+    customer_id INT64
+);
+
+CREATE OR REPLACE TABLE ecomm.Frequent_Buyers (
+    customer_id INT64
+);
+
+CREATE OR REPLACE TABLE ecomm.High_Value_Customers (
+    customer_id INT64
+);
+
+CREATE OR REPLACE TABLE ecomm.Category_Enthusiasts (
+    customer_id INT64, 
+    category STRING
+);
+
+CREATE OR REPLACE TABLE ecomm.Bargain_Hunters (
+    customer_id INT64
+);
+
+CREATE OR REPLACE TABLE ecomm.Seasonal_Shoppers (
+    customer_id INT64
+);
+
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+CREATE OR REPLACE TABLE ecomm.CustomersAndProducts AS -- Creating Summary Table to Create Necessary CustomerSegment Flags/Quick Reference if needed
+  SELECT
+    DISTINCT 
+    Customer_id,
+    customer_name,
+    Product_id,
+    Product_name,
+    Category,
+    COUNT(*) AS Transaction_Count,
+    SUM(purchase_amount) AS Purchase_amount,
+    COUNT(DISTINCT daytype) AS DayTypeCount,
+    MAX(daytype) AS DayType
+  FROM
+    ecomm.Core_Data
+  GROUP BY
+    Customer_id,
+    customer_name,
+    Product_id,
+    Product_name,
+    Category
+  ORDER BY
+    Customer_id
+    
+    ;
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+-- Insert into One_Time_Buyers
+INSERT INTO ecomm.One_Time_Buyers (customer_id)
+SELECT customer_id
+FROM ecomm.CustomersAndProducts
+GROUP BY customer_id
+HAVING COUNT(*) = 1 ;
+
+-- Insert into Frequent_Buyers
+INSERT INTO ecomm.Frequent_Buyers (customer_id)
+SELECT customer_id
+FROM ecomm.CustomersAndProducts
+GROUP BY customer_id
+HAVING COUNT(*) > 5 ;
+
+-- Insert into High_Value_Customers
+INSERT INTO ecomm.High_Value_Customers (customer_id)
+SELECT customer_id
+FROM ecomm.CustomersAndProducts
+GROUP BY customer_id
+HAVING SUM(Purchase_amount) >= 500 ;
+
+-- Insert into Category_Enthusiasts
+INSERT INTO ecomm.Category_Enthusiasts (customer_id, category)
+SELECT customer_id, MAX(category) -- Assuming a single, most frequent category qualifies them as enthusiasts.
+FROM ecomm.CustomersAndProducts
+GROUP BY customer_id
+HAVING COUNT(DISTINCT category) = 1 ;
+
+-- Insert into Bargain_Hunters
+-- This assumes that Bargain_Hunters are defined directly from Core_Data without the intermediary CustomersAndProducts structure.
+INSERT INTO ecomm.Bargain_Hunters (customer_id)
+SELECT customer_id
+FROM ecomm.Core_Data
+GROUP BY customer_id
+HAVING MAX(purchase_amount) <= 125 ;
+
+-- Insert into Seasonal_Shoppers
+-- This also assumes direct definition from Core_Data.
+INSERT INTO ecomm.Seasonal_Shoppers (customer_id)
+SELECT customer_id
+FROM ecomm.Core_Data
+GROUP BY customer_id
+HAVING COUNT(DISTINCT RetailSeason) = 1 ;
+
+
+/*
+
+Validating Results:
+
+Select * from ecomm.One_Time_Buyers
+Select * from ecomm.Frequent_Buyers
+Select * from ecomm.High_Value_Customers
+Select * from ecomm.Category_Enthusiasts
+Select * from ecomm.Bargain_Hunters
+Select * from ecomm.Seasonal_Shoppers
+
+*/
+
+-- Creating CustomerSegment Flag Columns in Customers table
+-- ALTER TABLE and UPDATE used in SQL Server; BigQuery consolidated into one operation
+
+CREATE OR REPLACE TABLE ecomm.Customers_New AS
+SELECT 
+  c.*,
+  IF(otb.customer_id IS NOT NULL, 1, 0) AS OneTimeBuyer,
+  IF(fb.customer_id IS NOT NULL, 1, 0) AS FrequentBuyer,
+  IF(hvc.customer_id IS NOT NULL, 1, 0) AS HighValueCustomer,
+  IF(ce.customer_id IS NOT NULL, 1, 0) AS CategoryEnthusiast,
+  IF(bh.customer_id IS NOT NULL, 1, 0) AS BargainHunter,
+  IF(ss.customer_id IS NOT NULL, 1, 0) AS SeasonalShopper
+FROM 
+  ecomm.customers c
+LEFT JOIN 
+  ecomm.One_Time_Buyers otb ON c.customer_id = otb.customer_id
+LEFT JOIN 
+  ecomm.Frequent_Buyers fb ON c.customer_id = fb.customer_id
+LEFT JOIN 
+  ecomm.High_Value_Customers hvc ON c.customer_id = hvc.customer_id
+LEFT JOIN 
+  ecomm.Category_Enthusiasts ce ON c.customer_id = ce.customer_id
+LEFT JOIN 
+  ecomm.Bargain_Hunters bh ON c.customer_id = bh.customer_id
+LEFT JOIN 
+  ecomm.Seasonal_Shoppers ss ON c.customer_id = ss.customer_id;
+
+
+-- Customers table now has Flags based on CustomerSegment Type
+-- Select * From ecomm.Customers_New
+
+--**********************************************************************************************************************************************************************************
+-- Customer Segmentation Metrics/Statistics
+--**********************************************************************************************************************************************************************************
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+/*
+
+Providing the following summary statistics for each customer segment:
+	1) The number of customers in each segment.
+	2) Average purchase frequency for each segment.
+	3) Total spending for each segment.
+	4) The most frequent first product purchased for each segment
+
+*/
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+--1) The number of customers in each segment.
+
+CREATE OR REPLACE TABLE ecomm.CustomerSegmentTotals AS
+SELECT 
+    SUM(OneTimeBuyer) AS OneTimeBuyers,
+    SUM(FrequentBuyer) AS FrequentBuyers,
+    SUM(HighValueCustomer) AS HighValueCustomers,
+    SUM(CategoryEnthusiast) AS CategoryEnthusiasts,
+    SUM(BargainHunter) AS BargainHunters,
+    SUM(SeasonalShopper) AS SeasonalShoppers
+FROM 
+    ecomm.Customers_New;
+
+
+-- Select * from ecomm.CustomerSegmentTotals
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+--2) Average purchase frequency for each segment.
+
+CREATE OR REPLACE TABLE ecomm.AveragePurchaseFrequencyBySegment AS
+WITH CustomerTransactions AS (
+    SELECT
+        c.customer_id,
+        COUNT(cd.transaction_id) AS NumberOfTransactions
+    FROM ecomm.Core_Data cd
+    JOIN ecomm.Customers_New c ON cd.customer_id = c.customer_id
+    GROUP BY c.customer_id
+)
+
+SELECT
+    'OneTimeBuyer' AS CustomerSegment,
+    IFNULL(ROUND(AVG(CAST(NumberOfTransactions AS FLOAT64)), 1), 0) AS AvgFrequency
+FROM CustomerTransactions ct
+JOIN ecomm.Customers_New c ON ct.customer_id = c.customer_id
+WHERE c.OneTimeBuyer = 1
+
+UNION ALL
+
+SELECT
+    'FrequentBuyer' AS CustomerSegment,
+    IFNULL(ROUND(AVG(CAST(NumberOfTransactions AS FLOAT64)), 1), 0) AS AvgFrequency
+FROM CustomerTransactions ct
+JOIN ecomm.Customers_New c ON ct.customer_id = c.customer_id
+WHERE c.FrequentBuyer = 1
+
+UNION ALL
+
+SELECT
+    'HighValueCustomer' AS CustomerSegment,
+    IFNULL(ROUND(AVG(CAST(NumberOfTransactions AS FLOAT64)), 1), 0) AS AvgFrequency
+FROM CustomerTransactions ct
+JOIN ecomm.Customers_New c ON ct.customer_id = c.customer_id
+WHERE c.HighValueCustomer = 1
+
+UNION ALL
+
+SELECT
+    'CategoryEnthusiast' AS CustomerSegment,
+    IFNULL(ROUND(AVG(CAST(NumberOfTransactions AS FLOAT64)), 1), 0) AS AvgFrequency
+FROM CustomerTransactions ct
+JOIN ecomm.Customers_New c ON ct.customer_id = c.customer_id
+WHERE c.CategoryEnthusiast = 1
+
+UNION ALL
+
+SELECT
+    'BargainHunter' AS CustomerSegment,
+    IFNULL(ROUND(AVG(CAST(NumberOfTransactions AS FLOAT64)), 1), 0) AS AvgFrequency
+FROM CustomerTransactions ct
+JOIN ecomm.Customers_New c ON ct.customer_id = c.customer_id
+WHERE c.BargainHunter = 1
+
+UNION ALL
+
+SELECT
+    'SeasonalShopper' AS CustomerSegment,
+    IFNULL(ROUND(AVG(CAST(NumberOfTransactions AS FLOAT64)), 1), 0) AS AvgFrequency
+FROM CustomerTransactions ct
+JOIN ecomm.Customers_New c ON ct.customer_id = c.customer_id
+WHERE c.SeasonalShopper = 1
+
+;
+-- Select * from ecomm.AveragePurchaseFrequencyBySegment
+
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+--3) Total spending for each segment.
+
+CREATE OR REPLACE TABLE ecomm.TotalSpendBySegment AS
+
+SELECT
+    'OneTimeBuyer' AS CustomerSegment,
+    IFNULL(SUM(cd.purchase_amount), 0) AS TotalSpend
+FROM ecomm.Core_Data cd
+JOIN ecomm.Customers_New c ON cd.customer_id = c.customer_id
+WHERE c.OneTimeBuyer = 1
+
+UNION ALL
+
+SELECT
+    'FrequentBuyer' AS CustomerSegment,
+    IFNULL(SUM(cd.purchase_amount), 0) AS TotalSpend
+FROM ecomm.Core_Data cd
+JOIN ecomm.Customers_New c ON cd.customer_id = c.customer_id
+WHERE c.FrequentBuyer = 1
+
+UNION ALL
+
+SELECT
+    'HighValueCustomer' AS CustomerSegment,
+    IFNULL(SUM(cd.purchase_amount), 0) AS TotalSpend
+FROM ecomm.Core_Data cd
+JOIN ecomm.Customers_New c ON cd.customer_id = c.customer_id
+WHERE c.HighValueCustomer = 1
+
+UNION ALL
+
+SELECT
+    'CategoryEnthusiast' AS CustomerSegment,
+    IFNULL(SUM(cd.purchase_amount), 0) AS TotalSpend
+FROM ecomm.Core_Data cd
+JOIN ecomm.Customers_New c ON cd.customer_id = c.customer_id
+WHERE c.CategoryEnthusiast = 1
+
+UNION ALL
+
+SELECT
+    'BargainHunter' AS CustomerSegment,
+    IFNULL(SUM(cd.purchase_amount), 0) AS TotalSpend
+FROM ecomm.Core_Data cd
+JOIN ecomm.Customers_New c ON cd.customer_id = c.customer_id
+WHERE c.BargainHunter = 1
+
+UNION ALL
+
+SELECT
+    'SeasonalShopper' AS CustomerSegment,
+    IFNULL(SUM(cd.purchase_amount), 0) AS TotalSpend
+FROM ecomm.Core_Data cd
+JOIN ecomm.Customers_New c ON cd.customer_id = c.customer_id
+WHERE c.SeasonalShopper = 1
+;
+
+-- Select * from ecomm.TotalSpendBySegment
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- The most frequent first product purchased for each segment
+
+CREATE OR REPLACE TABLE ecomm.MostFrequentFirstProductBySegment AS
+WITH FirstPurchaseTime AS (
+  SELECT 
+    customer_id, 
+    MIN(purchase_timestamp) AS FirstPurchaseTime
+  FROM 
+    ecomm.Core_Data
+  GROUP BY 
+    customer_id
+),
+FirstProducts AS (
+  SELECT 
+    cd.customer_id,
+    cd.customer_name,
+    cd.product_name,
+    CASE
+      WHEN cn.OneTimeBuyer = 1 THEN 'One Time Buyer'
+      WHEN cn.FrequentBuyer = 1 THEN 'Frequent Buyer'
+      WHEN cn.HighValueCustomer = 1 THEN 'High Value Customer'
+      WHEN cn.CategoryEnthusiast = 1 THEN 'Category Enthusiast'
+      WHEN cn.BargainHunter = 1 THEN 'Bargain Hunter'
+      WHEN cn.SeasonalShopper = 1 THEN 'Seasonal Shopper'
+      ELSE NULL 
+    END AS CustomerSegment
+  FROM 
+    FirstPurchaseTime fpt
+  JOIN 
+    ecomm.Core_Data cd ON fpt.customer_id = cd.customer_id AND fpt.FirstPurchaseTime = cd.purchase_timestamp
+  JOIN 
+    ecomm.Customers_New cn ON cd.customer_id = cn.customer_id
+  WHERE 
+    cn.OneTimeBuyer = 1 OR cn.FrequentBuyer = 1 OR cn.HighValueCustomer = 1 OR 
+    cn.CategoryEnthusiast = 1 OR cn.BargainHunter = 1 OR cn.SeasonalShopper = 1
+),
+AggregatedProducts AS (
+  SELECT 
+    CustomerSegment,
+    product_name,
+    COUNT(*) AS Frequency
+  FROM 
+    FirstProducts
+  GROUP BY 
+    CustomerSegment, product_name
+)
+SELECT 
+  CustomerSegment,
+  COUNT(product_name) AS ProductCount,
+  ARRAY_AGG(product_name ORDER BY Frequency DESC LIMIT 1)[OFFSET(0)] AS MostFrequentFirstProduct
+FROM 
+  AggregatedProducts
+GROUP BY 
+  CustomerSegment;
+
+
+-- Select * from ecomm.MostFrequentFirstProductBySegment
+
+--**********************************************************************************************************************************************************************************
+-- Product Recommendations
+--**********************************************************************************************************************************************************************************
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+-- Product Recommendations
+CREATE OR REPLACE TABLE ecomm.ProductRecommendationsByCustomer AS
+
+WITH ProductPairs AS (
+  SELECT
+    a.product_name AS FirstProduct,
+    b.product_name AS SecondProduct,
+    COUNT(DISTINCT a.customer_id) AS NumCustomers
+  FROM
+    `ecomm.Core_Data` a
+  JOIN
+    `ecomm.Core_Data` b ON a.customer_id = b.customer_id
+    AND a.transaction_id <> b.transaction_id
+    AND a.product_id < b.product_id
+  GROUP BY
+    a.product_name, b.product_name
+  HAVING
+    COUNT(DISTINCT a.customer_id) > 2
+),
+Recommendations AS (
+  SELECT
+    c.customer_name,
+    pp.SecondProduct
+  FROM
+    `ecomm.Core_Data` c
+  JOIN
+    ProductPairs pp ON c.product_name = pp.FirstProduct
+)
+SELECT
+  customer_name AS CustomerName,
+  STRING_AGG(SecondProduct, ', ' ORDER BY SecondProduct) AS Recommendations
+FROM
+  Recommendations
+GROUP BY
+  customer_name
+ORDER BY
+  SAFE_CAST(REGEXP_EXTRACT(customer_name, r'(\d+)') AS INT64) -- An attempt at sorting by customer "Number" since they have numbers in their name...won't be necessary with alpha names.
+  
+;
+
+
+
+
+--Select * from ecomm.ProductRecommendationsByCustomer
+
+CREATE OR REPLACE TABLE ecomm.CustomerPreferredShoppingSeasons AS
+
+WITH RankedSeasons AS (
+  SELECT
+    customer_id,
+    RetailSeason,
+    COUNT(*) AS transaction_count,
+    RANK() OVER (PARTITION BY customer_id ORDER BY COUNT(*) DESC) AS season_rank
+  FROM
+    ecomm.Core_Data
+  GROUP BY
+    customer_id, RetailSeason
+),
+TopSeasons AS (
+  SELECT
+    customer_id,
+    RetailSeason
+  FROM RankedSeasons
+  WHERE season_rank = 1
+),
+DistinctSeasons AS (
+  SELECT DISTINCT
+    c.customer_name,
+    ts.RetailSeason
+  FROM TopSeasons ts
+  JOIN ecomm.Core_Data c ON ts.customer_id = c.customer_id
+)
+SELECT
+  customer_name AS CustomerName,
+  STRING_AGG(RetailSeason, ', ' ORDER BY RetailSeason) AS PreferredSeasons
+FROM DistinctSeasons
+GROUP BY customer_name
+ORDER BY SAFE_CAST(REGEXP_EXTRACT(customer_name, r'(\d+)') AS INT64); --An attempt at sorting by customer "Number" since they have numbers in their name...won't be necessary with alpha names.
+
+--Select * from ecomm.CustomerPreferredShoppingSeasons
+
+
+--**********************************************************************************************************************************************************************************
+-- Cohort Life-Time Value
+--**********************************************************************************************************************************************************************************
+
+CREATE OR REPLACE TABLE ecomm.CohortMetrics AS
+
+WITH FirstPurchase AS ( -- Getting First Purchase Dates
+  SELECT
+    customer_id,
+    MIN(DATE(purchase_timestamp)) AS first_purchase_date
+  FROM
+    `ecomm.Core_Data`
+  GROUP BY
+    customer_id
+),
+
+CohortData AS ( -- Defining my cohorts based on first purchase week; 
+  SELECT
+    cd.customer_id,
+    f.first_purchase_date,
+    DATE_TRUNC(f.first_purchase_date, WEEK(MONDAY)) AS cohort_week_start, --this is a new function for me. Had to look up how to do this one...
+    cd.purchase_amount,
+    DATE_DIFF(DATE(cd.purchase_timestamp), f.first_purchase_date, MONTH) AS months_after_first_purchase --calculating how many months after first purchase date
+  FROM
+    `ecomm.Core_Data` cd
+  JOIN
+    FirstPurchase f ON cd.customer_id = f.customer_id
+),
+
+CohortMetrics AS ( --Performing both of the requested metrics
+  SELECT
+    cohort_week_start,
+    ROUND(AVG(purchase_amount),2) AS avg_lifetime_value, --because of the aggregating above, I can just average the purchase amount here to get lifetime value
+    ROUND(AVG(CASE WHEN months_after_first_purchase = 0 THEN purchase_amount ELSE NULL END),2) AS avg_first_month_revenue --averaging first month only using CASE statement
+  FROM
+    CohortData
+  GROUP BY
+    cohort_week_start
+)
+
+SELECT
+  cohort_week_start,
+  avg_lifetime_value,
+  AVG(avg_first_month_revenue) OVER(PARTITION BY cohort_week_start ORDER BY cohort_week_start ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS avg_cumulative_first_month_revenue -- had to look up the syntax for this one as well. The "cumulative" piece is what me choose the idea of a windowed function
+FROM
+  CohortMetrics
+ORDER BY
+  cohort_week_start
+
+;
+
